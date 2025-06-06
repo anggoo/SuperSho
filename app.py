@@ -78,6 +78,68 @@ if uploaded_files:
             st.write(f'**{video_name}**: {len(frames)} sharpest frames extracted')
             for i, frame in enumerate(frames[:2]):  # Show up to 2 frames per video
                 st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), caption=f'{video_name} - Sharpest Frame {i+1}', use_column_width=True)
-        # Download as zip
-        zip_buffer = all_frames_to_zip(frames_dict)
-        st.download_button('Download All as Zip', zip_buffer, file_name='all_sharpest_frames.zip', mime='application/zip') 
+        # Group sharpest frame images by rules and create four zip files
+        import re
+        from io import BytesIO
+        
+        # Helper to determine zip group
+        def get_zip_group(filename):
+            match = re.search(r'region_(\d+).*frame_(\d+)', filename, re.IGNORECASE)
+            if not match:
+                return None
+            region = int(match.group(1))
+            frame = int(match.group(2))
+            if region == 2 and 1 <= frame <= 16:
+                return 'upper right'
+            elif region == 2 and frame >= 17:
+                return 'upper left'
+            elif region == 0 and frame >= 17:
+                return 'lower right'
+            elif region == 0 and 1 <= frame <= 16:
+                return 'lower left'
+            return None
+
+        # Collect all sharpest frame images into a dict by group
+        grouped_images = {'upper right': [], 'upper left': [], 'lower right': [], 'lower left': []}
+        for video_name, frames in frames_dict.items():
+            safe_name = os.path.splitext(os.path.basename(video_name))[0]
+            for i, frame in enumerate(frames):
+                img_name = f'{safe_name}_frame_{i+1}.jpg'
+                group = get_zip_group(img_name)
+                if group:
+                    grouped_images[group].append((img_name, frame))
+
+        # Function to create zip buffer for a group
+        def make_zip_buffer(image_list):
+            zip_buffer = BytesIO()
+            with ZipFile(zip_buffer, 'w') as zip_file:
+                for img_name, frame in image_list:
+                    _, img_encoded = cv2.imencode('.jpg', frame)
+                    zip_file.writestr(img_name, img_encoded.tobytes())
+            zip_buffer.seek(0)
+            return zip_buffer
+
+        # Create a master zip file containing categorized zip files (if they have content)
+        master_zip_buffer = BytesIO()
+        any_group_has_images = False
+        with ZipFile(master_zip_buffer, 'w') as master_zipf:
+            for group_name, image_list in grouped_images.items():
+                if image_list:  # Only include category zip if it has images
+                    any_group_has_images = True
+                    category_zip_filename = f'{group_name.replace(" ", "_")}.zip'
+                    # Use the existing make_zip_buffer to create the content for this category's zip
+                    category_zip_content_buffer = make_zip_buffer(image_list) 
+                    master_zipf.writestr(category_zip_filename, category_zip_content_buffer.getvalue())
+        
+        master_zip_buffer.seek(0)
+
+        if any_group_has_images:
+            st.download_button(
+                label='Download All Grouped Zips',
+                data=master_zip_buffer, 
+                file_name='grouped_frames_archive.zip', 
+                mime='application/zip'
+            )
+        else:
+            st.info('No images were categorized into groups, so no archive was created.')
+ 

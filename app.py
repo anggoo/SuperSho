@@ -97,6 +97,14 @@ if uploaded_files:
                 return 'lower right'
             elif region == 0 and 1 <= frame <= 16:
                 return 'lower left'
+            elif region == 1 and 1 <= frame <= 16:
+                return 'lower right'
+            elif region == 1 and frame >= 17:
+                return 'lower left'
+            elif region == 3 and 1 <= frame <= 16:
+                return 'upper left'
+            elif region == 3 and frame >= 17:
+                return 'upper right'
             return None
 
         # Collect all sharpest frame images into a dict by group

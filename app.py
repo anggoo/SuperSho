@@ -1,153 +1,118 @@
-import streamlit as st
-import cv2
-import numpy as np
-import tempfile
 import os
-from zipfile import ZipFile
-from io import BytesIO
-import random
+import streamlit as st
+from datetime import datetime,timedelta, date
+from PIL import Image
+import requests
+import toml
+from geopy.distance import geodesic
+from streamlit_js_eval import get_geolocation
+import socket
+import uuid
+import platform
+from geopy.geocoders import Nominatim
 
-# Function to compute blur score (higher = sharper)
-def blur_score(image):
-    return cv2.Laplacian(image, cv2.CV_64F).var()
+# Load configuration from secrets.toml
+with open("secrets.toml", "r") as f:
+    config = toml.load(f)
 
-def extract_sharpest_frames(video_path, min_chunk=4, max_chunk=7):
-    cap = cv2.VideoCapture(video_path)
-    frames = []
-    sharpest_frames = []
-    frame_count = 0
-    chunk_size = random.randint(min_chunk, max_chunk)
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-        frame_count += 1
-        if len(frames) == chunk_size:
-            # Find sharpest frame in this chunk
-            scores = [blur_score(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)) for f in frames]
-            idx = int(np.argmax(scores))
-            sharpest_frames.append(frames[idx])
-            frames = []
-            chunk_size = random.randint(min_chunk, max_chunk)
-    # Handle last chunk
-    if frames:
-        scores = [blur_score(cv2.cvtColor(f, cv2.COLOR_BGR2GRAY)) for f in frames]
-        idx = int(np.argmax(scores))
-        sharpest_frames.append(frames[idx])
-    cap.release()
-    return sharpest_frames
+# Telegram
+BOT_TOKEN = config["BOT_TOKEN"]
+CHAT_IDS = config["TELEGRAM_CHAT_IDS"]
+latitude = config["latitude"]
+longitude = config["longitude"]
 
-def all_frames_to_zip(frames_dict):
-    zip_buffer = BytesIO()
-    with ZipFile(zip_buffer, 'w') as zip_file:
-        for video_name, frames in frames_dict.items():
-            for i, frame in enumerate(frames):
-                _, img_encoded = cv2.imencode('.jpg', frame)
-                # Use video name and frame index in filename
-                safe_name = os.path.splitext(os.path.basename(video_name))[0]
-                zip_file.writestr(f'{safe_name}_frame_{i+1}.jpg', img_encoded.tobytes())
-    zip_buffer.seek(0)
-    return zip_buffer
 
-st.title('Super Shomaila Extractor (Batch)')
-st.write('Drag and drop up to 200 videos. The app will extract the sharpest frame in each video and let you download all results as a zip.')
+# Hardcoded user list
+USERS = [
+    "sham",
+    "pragya",
+    "saloni",
+    "shomaila"
+]
 
-uploaded_files = st.file_uploader('Upload Videos', type=['mp4', 'avi', 'mov', 'mkv'], accept_multiple_files=True)
+# Allowed location (latitude, longitude)
+ALLOWED_LOCATION = (latitude, longitude)  # Change as needed
+ALLOWED_RADIUS_KM = 1.0  # Allowed radius in kilometers
 
-if uploaded_files:
-    if len(uploaded_files) > 200:
-        st.error('Please upload no more than 200 videos at once.')
+def send_to_telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    for chat_id in CHAT_IDS:
+        payload = {"chat_id": chat_id, "text": message}
+        requests.post(url, data=payload)
+
+def get_device_info():
+    hostname = socket.gethostname()
+    mac = ':'.join(['{:02x}'.format((uuid.getnode() >> ele) & 0xff)
+                    for ele in range(0,8*6,8)][::-1])
+    user = os.getlogin() if hasattr(os, "getlogin") else "Unknown"
+    system = platform.system()
+    release = platform.release()
+    return f"Hostname: {hostname}\nMAC: {mac}\nOS User: {user}\nSystem: {system} {release}"
+
+def is_within_allowed_location(lat, lon):
+    user_location = (latitude, longitude)
+    distance = geodesic(user_location, ALLOWED_LOCATION).kilometers
+    return distance <= ALLOWED_RADIUS_KM
+
+st.title("Attendance Submission")
+
+# Get user's geolocation
+location = get_geolocation()
+if location is None:
+    st.warning("Waiting for location data...")
+else:
+    lat = location['coords']['latitude']
+    lon = location['coords']['longitude']
+    if not is_within_allowed_location(lat, lon):
+        st.error("You are not within the allowed location to log your attendance.")
     else:
-        frames_dict = {}
-        progress = st.progress(0)
-        status = st.empty()
-        for idx, uploaded_file in enumerate(uploaded_files):
-            video_name = uploaded_file.name
-            status.info(f'Processing {video_name} ({idx+1}/{len(uploaded_files)})...')
-            with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmpfile:
-                tmpfile.write(uploaded_file.read())
-                tmp_video_path = tmpfile.name
-            sharpest_frames = extract_sharpest_frames(tmp_video_path, min_chunk=7, max_chunk=12)
-            frames_dict[video_name] = sharpest_frames
-            os.remove(tmp_video_path)
-            progress.progress((idx+1)/len(uploaded_files))
-        status.success(f'Processed {len(uploaded_files)} videos. Ready to download!')
-        # Optionally display a few frames from each video
-        for video_name, frames in frames_dict.items():
-            st.write(f'**{video_name}**: {len(frames)} sharpest frames extracted')
-            for i, frame in enumerate(frames[:2]):  # Show up to 2 frames per video
-                st.image(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB), caption=f'{video_name} - Sharpest Frame {i+1}', use_column_width=True)
-        # Group sharpest frame images by rules and create four zip files
-        import re
-        from io import BytesIO
-        
-        # Helper to determine zip group
-        def get_zip_group(filename):
-            match = re.search(r'region_(\d+).*frame_(\d+)', filename, re.IGNORECASE)
-            if not match:
-                return None
-            region = int(match.group(1))
-            frame = int(match.group(2))
-            if region == 2 and 1 <= frame <= 16:
-                return 'upper right'
-            elif region == 2 and frame >= 17:
-                return 'upper left'
-            elif region == 0 and frame >= 17:
-                return 'lower right'
-            elif region == 0 and 1 <= frame <= 16:
-                return 'lower left'
-            elif region == 1 and 1 <= frame <= 16:
-                return 'lower right'
-            elif region == 1 and frame >= 17:
-                return 'lower left'
-            elif region == 3 and 1 <= frame <= 16:
-                return 'upper left'
-            elif region == 3 and frame >= 17:
-                return 'upper right'
-            return None
-
-        # Collect all sharpest frame images into a dict by group
-        grouped_images = {'upper right': [], 'upper left': [], 'lower right': [], 'lower left': []}
-        for video_name, frames in frames_dict.items():
-            safe_name = os.path.splitext(os.path.basename(video_name))[0]
-            for i, frame in enumerate(frames):
-                img_name = f'{safe_name}_frame_{i+1}.jpg'
-                group = get_zip_group(img_name)
-                if group:
-                    grouped_images[group].append((img_name, frame))
-
-        # Function to create zip buffer for a group
-        def make_zip_buffer(image_list):
-            zip_buffer = BytesIO()
-            with ZipFile(zip_buffer, 'w') as zip_file:
-                for img_name, frame in image_list:
-                    _, img_encoded = cv2.imencode('.jpg', frame)
-                    zip_file.writestr(img_name, img_encoded.tobytes())
-            zip_buffer.seek(0)
-            return zip_buffer
-
-        # Create a master zip file containing categorized zip files (if they have content)
-        master_zip_buffer = BytesIO()
-        any_group_has_images = False
-        with ZipFile(master_zip_buffer, 'w') as master_zipf:
-            for group_name, image_list in grouped_images.items():
-                if image_list:  # Only include category zip if it has images
-                    any_group_has_images = True
-                    category_zip_filename = f'{group_name.replace(" ", "_")}.zip'
-                    # Use the existing make_zip_buffer to create the content for this category's zip
-                    category_zip_content_buffer = make_zip_buffer(image_list) 
-                    master_zipf.writestr(category_zip_filename, category_zip_content_buffer.getvalue())
-        
-        master_zip_buffer.seek(0)
-
-        if any_group_has_images:
-            st.download_button(
-                label='Download All Grouped Zips',
-                data=master_zip_buffer, 
-                file_name='grouped_frames_archive.zip', 
-                mime='application/zip'
+        user = st.selectbox("Select your name", USERS)
+        submit = st.button("Submit Attendance")
+        if submit and user:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            device_info = get_device_info()
+            message = (
+                f"Attendance submitted:\n"
+                f"User: {user}\n"
+                f"Time: {now}\n"
+                f"Location: ({lat}, {lon})\n"
+                f"{device_info}"
             )
-        else:
-            st.info('No images were categorized into groups, so no archive was created.')
- 
+            send_to_telegram(message)
+            st.success("Attendance submitted and sent to the manager!")
+
+            st.header("Leave Submission")
+
+leave_type = st.selectbox("Leave Type", ["Sick Leave", "Personal Leave", "Annual Leave"])
+today = date.today()
+
+if leave_type == "Personal Leave":
+    leave_date = st.date_input("Select leave date", value=today, min_value=today, max_value=None)
+elif leave_type == "Sick Leave":
+    leave_date = st.date_input("Select leave date", value=today, min_value=today, max_value= today)
+elif leave_type == "Annual Leave":
+    leave_start = st.date_input(
+        "Select start date", value=today + timedelta(days=7), min_value=today + timedelta(days=7), max_value=None
+    )
+    leave_end = st.date_input(
+        "Select end date", value=leave_start, min_value=leave_start, max_value=None
+    )
+leave_submit = st.button("Submit Leave")
+
+if leave_submit:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    if leave_type == "Annual Leave":
+        leave_info = f"Leave Dates: {leave_start} to {leave_end}"
+    else:
+        leave_info = f"Leave Date: {leave_date}"
+    message = (
+        f"Leave Submitted:\n"
+        f"User: {user}\n"
+        f"Type: {leave_type}\n"
+        f"{leave_info}\n"
+        f"Submission Time: {now}"
+    )
+    send_to_telegram(message)
+    st.success("Leave submitted and sent to the manager!")
+
+st.info("No login required. No data is stored locally.")
